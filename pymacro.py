@@ -2,8 +2,13 @@ import inspect
 import ast
 from types import FunctionType
 from copy import deepcopy
+import functools
+
 
 class Macro:
+    def __init__(self, *, mode):
+        self.mode = mode
+
     def set(self, code):
         self.ast = ast.parse(code).body[0]
         self.name = self.ast.name
@@ -23,9 +28,12 @@ class Macro:
             self.kwarg = self.ast.args.kwarg.arg
         except AttributeError:
             self.kwarg = None
-
+        try:
+            posonlyargs = self.ast.args.posonlyargs
+        except AttributeError:
+            posonlyargs = []
         args, defaults, kwonlyargs, kw_defaults = \
-            self.ast.args.posonlyargs + self.ast.args.args, \
+            posonlyargs + self.ast.args.args, \
             self.ast.args.defaults, self.ast.args.kwonlyargs, self.ast.args.kw_defaults
 
         for i in range(len(args)):
@@ -46,9 +54,11 @@ class Macro:
                     (self.kwonlyargs[i + len(kwonlyargs) - len(kw_defaults)],
                      kw_defaults[i].value)
 
-    def make_ast(self, mode):
-        if mode == "Expr":
+    def make_ast(self):
+        if self.mode == "f":
             return deepcopy(self.ast.body[0].value)
+        if self.mode == "s":
+            return deepcopy(self.ast.body[0])
 
     def match(self, name):
         if self.name == name:
@@ -118,15 +128,11 @@ class MacroSideAdapter(ast.NodeTransformer):
             var_map, kw_var_map, vararg, kwarg
 
 
-    def visit_Name(self, node: Name) -> Any:
+    def visit_Name(self, node):
         if node.id in self.var_map:
             new_node = deepcopy(self.var_map[node.id])
             new_node.ctx = node.ctx
             return new_node
-        return node
-
-    def visit_NamedExpr(self, node: NamedExpr) -> Any:
-        self.generic_visit(node)
         return node
 
 
@@ -134,7 +140,7 @@ class MacroAdapter(ast.NodeTransformer):
     def __init__(self, Macro):
         self.Macro = Macro
 
-    def visit_Call(self, node: Call) -> Any:
+    def visit_Call(self, node):
         name = node.func.id
         match_macro = self.Macro.match(name)
         if match_macro:
@@ -145,18 +151,50 @@ class MacroAdapter(ast.NodeTransformer):
                 kwargs += [(i.arg, i.value)]
 
             result = MacroSideAdapter(match_macro, node.args, kwargs)\
-                .visit(match_macro.make_ast("Expr"))
+                .visit(match_macro.make_ast())
 
             return result
 
         self.generic_visit(node)
         return node
 
+    def visit_Expr(self, node):
+        try:
+            match_macro = self.Macro.match(node.value.func.id)
+            if match_macro.mode == "s":
+                if match_macro:
+                    call_kwargs = node.value.keywords
+                    kwargs = []
 
-def def_macro(func: function, mode="Expr") -> Macro:
-    macro_obj = Macro()
-    macro_obj.set(inspect.getsource(func))
-    return macro_obj
+                    for i in call_kwargs:
+                        kwargs += [(i.arg, i.value)]
+
+                    result = MacroSideAdapter(match_macro, node.value.args, kwargs)\
+                        .visit(match_macro.make_ast())
+
+
+
+                    return result
+        except:
+            pass
+
+        self.generic_visit(node)
+        return node
+
+
+def def_macro(*args, **kwargs):
+    mode = kwargs.get("mode", "f")
+    if len(args) != 0 and callable(args[0]):
+        func = args[0]
+        macro_obj = Macro(mode=mode)
+        macro_obj.set(inspect.getsource(func))
+        return macro_obj
+    else:
+        def def_macro_sub(func):
+            macro_obj = Macro(mode=mode)
+            macro_obj.set(inspect.getsource(func))
+            return macro_obj
+    return def_macro_sub
 
 
 def macro(macro_obj, *, print_code=False):
@@ -170,9 +208,6 @@ def macro(macro_obj, *, print_code=False):
             if i.func.id != "macro":
                 new_decorator_list += [i]
         new_ast.body[1].decorator_list = new_decorator_list
-
-        if print_code:
-            return ast.unparse(new_ast)
 
         exec(compile(new_ast, "<string>", "exec"))
 
