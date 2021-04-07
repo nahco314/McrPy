@@ -12,6 +12,9 @@ class Macro:
     def set(self, code):
         self.ast = ast.parse(code).body[0]
         self.name = self.ast.name
+        if self.mode == "c":
+            self.const_set()
+            return None
         self.args = []
         self.name_to_idx = {}
         self.kwonlyargs = []
@@ -54,6 +57,13 @@ class Macro:
                     (self.kwonlyargs[i + len(kwonlyargs) - len(kw_defaults)],
                      kw_defaults[i].value)
 
+    def const_set(self):
+        self.const_macro_map = {}
+
+        for i in self.ast.body:
+            if type(i) == ast.AnnAssign:
+                self.const_macro_map[i.target.id] = i.annotation
+
     def make_ast(self):
         if self.mode == "f":
             return deepcopy(self.ast.body[0].value)
@@ -76,10 +86,16 @@ class Macro:
 class Macros:
     def __init__(self, first_macro):
         self.macros = [first_macro]
+        self.const_macro_map = {}
+        if first_macro.mode == "c":
+            self.const_macro_map = deepcopy(first_macro.const_macro_map)
 
     def __or__(self, other):
         result = deepcopy(self)
-        result.macros += [other]
+        try:
+            result.const_macro_map |= other.const_macro_map
+        except:
+            result.macros += [other]
         return result
 
     def __ior__(self, other):
@@ -127,7 +143,6 @@ class MacroSideAdapter(ast.NodeTransformer):
         self.var_map, self.kw_var_map, self.vararg, self.kwarg = \
             var_map, kw_var_map, vararg, kwarg
 
-
     def visit_Name(self, node):
         if node.id in self.var_map:
             new_node = deepcopy(self.var_map[node.id])
@@ -141,6 +156,9 @@ class MacroAdapter(ast.NodeTransformer):
         self.Macro = Macro
 
     def visit_Call(self, node):
+        if type(node.func) != ast.Name:
+            self.generic_visit(node)
+            return node
         name = node.func.id
         match_macro = self.Macro.match(name)
         if match_macro:
@@ -152,6 +170,8 @@ class MacroAdapter(ast.NodeTransformer):
 
             result = MacroSideAdapter(match_macro, node.args, kwargs)\
                 .visit(match_macro.make_ast())
+
+            self.generic_visit(result)
 
             return result
 
@@ -172,7 +192,7 @@ class MacroAdapter(ast.NodeTransformer):
                     result = MacroSideAdapter(match_macro, node.value.args, kwargs)\
                         .visit(match_macro.make_ast())
 
-
+                    self.generic_visit(result)
 
                     return result
         except:
@@ -181,9 +201,16 @@ class MacroAdapter(ast.NodeTransformer):
         self.generic_visit(node)
         return node
 
+    def visit_Name(self, node):
+        try:
 
-def def_macro(*args, **kwargs):
-    mode = kwargs.get("mode", "f")
+            return self.Macro.const_macro_map[node.id]
+        except:
+            self.generic_visit(node)
+            return node
+
+
+def def_macro(*args, mode="f", **kwargs):
     if len(args) != 0 and callable(args[0]):
         func = args[0]
         macro_obj = Macro(mode=mode)
@@ -208,6 +235,9 @@ def macro(macro_obj, *, print_code=False):
             if i.func.id != "macro":
                 new_decorator_list += [i]
         new_ast.body[1].decorator_list = new_decorator_list
+
+        if print_code:
+            return ast.unparse(new_ast)
 
         exec(compile(new_ast, "<string>", "exec"))
 
